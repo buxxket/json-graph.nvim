@@ -87,7 +87,7 @@ export function App() {
   }
 
   if (!session || !parsedJson) {
-    return <div className="loading">Loading graph555</div>;
+    return <div className="loading">Loading graph...</div>;
   }
 
   return (
@@ -98,3 +98,21 @@ export function App() {
           <p className="meta">Mode: {session.mode}</p>
         </div>
         <div className="meta">Click any node to jump in Neovim</div>
+      </header>
+
+      <main className="canvas-shell">
+        <JSONCrack
+          json={parsedJson}
+          layoutDirection={chooseLayout(session.mode)}
+          onNodeClick={onNodeClick}
+          theme="dark"
+          showControls
+          showGrid
+          centerOnLayout
+        />
+      </main>
+
+      <footer className="status">{jumpState || "Ready"}</footer>
+    </div>
+  );
+}

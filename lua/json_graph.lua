@@ -1,200 +1,119 @@
 local M = {
 	state = {
-		web_server_job = nil,
 		source_bufnr = nil,
 		source_winid = nil,
 	},
 }
 
-local function sorted_keys(tbl)
-	local keys = {}
-	for key in pairs(tbl) do
-		keys[#keys + 1] = key
-	end
-	table.sort(keys, function(left, right)
-		return tostring(left) < tostring(right)
-	end)
-	return keys
+local function plugin_root()
+	local source = debug.getinfo(1, "S").source:sub(2)
+	return vim.fs.dirname(vim.fs.dirname(source))
 end
 
-local function count_keys(tbl)
-	local count = 0
-	for _ in pairs(tbl) do
-		count = count + 1
-	end
-	return count
+local function web_root()
+	return plugin_root() .. "/tools/json-graph-web"
 end
 
-local function is_array(tbl)
-	if type(tbl) ~= "table" then
-		return false
-	end
-
-	local max_index = 0
-	local count = 0
-	for key in pairs(tbl) do
-		if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-			return false
-		end
-		max_index = math.max(max_index, key)
-		count = count + 1
-	end
-
-	return count == 0 or max_index == count
+local function web_dist_index()
+	return web_root() .. "/dist/index.html"
 end
 
-local function truncate(text, limit)
-	text = tostring(text)
-	if #text <= limit then
-		return text
-	end
-	return text:sub(1, limit - 3) .. "..."
+local function read_current_buffer_text(bufnr)
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	return table.concat(lines, "\n")
 end
 
-local function format_scalar(value)
-	local value_type = type(value)
-	if value == vim.NIL or value == nil then
-		return "null"
+local function decode_json(text)
+	local ok, decoded = pcall(vim.json.decode, text)
+	if not ok then
+		return nil, decoded
 	end
-	if value_type == "string" then
-		return string.format('string "%s"', truncate(value, 42))
-	end
-	if value_type == "boolean" then
-		return string.format("boolean %s", tostring(value))
-	end
-	if value_type == "number" then
-		return string.format("number %s", tostring(value))
-	end
-	return value_type
+	return decoded, nil
 end
 
-local function summarize_value(value)
-	if value == vim.NIL or value == nil then
-		return "null"
+local function run_command(cmd, cwd)
+	if vim.system then
+		local result = vim.system(cmd, { cwd = cwd, text = true }):wait()
+		return result.code == 0, result.stdout or "", result.stderr or ""
 	end
-	if type(value) ~= "table" then
-		return format_scalar(value)
-	end
-	if is_array(value) then
-		return string.format("array[%d]", #value)
-	end
-	return string.format("object{%d}", count_keys(value))
+
+	local joined = table.concat(vim.tbl_map(vim.fn.shellescape, cmd), " ")
+	local output = vim.fn.system(joined)
+	local ok = vim.v.shell_error == 0
+	return ok, output or "", ok and "" or (output or "")
 end
 
-local function schema_type_label(schema)
-	if type(schema) ~= "table" then
-		return "unknown"
+function M.build_web()
+	local root = web_root()
+	if vim.uv.fs_stat(root .. "/package.json") == nil then
+		return nil, "Missing tools/json-graph-web/package.json"
 	end
 
-	local schema_type = schema.type
-	local label
-	if type(schema_type) == "string" then
-		label = schema_type
-	elseif type(schema_type) == "table" then
-		local types = {}
-		for _, item in ipairs(schema_type) do
-			types[#types + 1] = tostring(item)
-		end
-		table.sort(types)
-		label = table.concat(types, "|")
-	elseif schema.properties or schema.additionalProperties ~= nil then
-		label = "object"
-	elseif schema.items ~= nil then
-		label = "array"
+	local ok_install, _, install_err = run_command({ "pnpm", "install", "--frozen-lockfile" }, root)
+	if not ok_install then
+		return nil, "pnpm install failed: " .. install_err
+	end
+
+	local ok_build, _, build_err = run_command({ "pnpm", "build" }, root)
+	if not ok_build then
+		return nil, "pnpm build failed: " .. build_err
+	end
+
+	local dist = web_dist_index()
+	if vim.uv.fs_stat(dist) == nil then
+		return nil, "Build finished but dist/index.html is missing"
+	end
+
+	return dist, nil
+end
+
+local function open_in_split(decoded)
+	local out = vim.inspect(decoded)
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].filetype = "lua"
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(out, "\n"))
+	vim.cmd("botright split")
+	vim.api.nvim_win_set_buf(0, buf)
+end
+
+function M.open(opts)
+	opts = opts or {}
+	local bufnr = vim.api.nvim_get_current_buf()
+	local text = read_current_buffer_text(bufnr)
+	local decoded, err = decode_json(text)
+	if not decoded then
+		vim.notify("JsonGraph: invalid JSON: " .. tostring(err), vim.log.levels.ERROR)
+		return
+	end
+
+	M.state.source_bufnr = bufnr
+	M.state.source_winid = vim.api.nvim_get_current_win()
+
+	local view = opts.view or "auto"
+	if view == "split" then
+		open_in_split(decoded)
+		return
+	end
+
+	if vim.uv.fs_stat(web_dist_index()) == nil then
+		vim.notify("JsonGraph: web assets missing. Run :JsonGraphBuild", vim.log.levels.WARN)
+		open_in_split(decoded)
+		return
+	end
+
+	local target = "file://" .. web_dist_index()
+	if vim.ui and vim.ui.open then
+		vim.ui.open(target)
 	else
-		label = "value"
+		vim.fn.jobstart({ "xdg-open", target }, { detach = true })
 	end
-
-	if schema.nullable and not label:find("null", 1, true) then
-		label = label .. "|null"
-	end
-
-	return label
 end
 
-local function summarize_schema(schema)
-	local parts = { schema_type_label(schema) }
-	if type(schema) ~= "table" then
-		return parts[1]
+function M.jump_to_path(_path)
+	if M.state.source_winid and vim.api.nvim_win_is_valid(M.state.source_winid) then
+		vim.api.nvim_set_current_win(M.state.source_winid)
 	end
-	if schema.format then
-		parts[#parts + 1] = "format=" .. schema.format
-	end
-	if schema.additionalProperties == false then
-		parts[#parts + 1] = "closed"
-	end
-	if schema.description and schema.description ~= "" then
-		parts[#parts + 1] = truncate(schema.description, 40)
-	end
-	return table.concat(parts, " | ")
+	return true
 end
 
-local function is_json_schema(decoded)
-	if type(decoded) ~= "table" then
-		return false
-	end
-
-	return decoded["$schema"] ~= nil
-		or decoded.properties ~= nil
-		or decoded.additionalProperties ~= nil
-		or decoded.items ~= nil
-end
-
-local function value_children(value)
-	local children = {}
-	if type(value) ~= "table" then
-		return children
-	end
-
-	if is_array(value) then
-		for index, item in ipairs(value) do
-			children[#children + 1] = {
-				label = string.format("[%d]", index),
-				value = item,
-			}
-		end
-		return children
-	end
-
-	for _, key in ipairs(sorted_keys(value)) do
-		children[#children + 1] = {
-			label = tostring(key),
-			value = value[key],
-			}
-	end
-
-	return children
-end
-
-local function schema_children(schema)
-	local children = {}
-	if type(schema) ~= "table" then
-		return children
-	end
-
-	if type(schema.properties) == "table" then
-		for _, key in ipairs(sorted_keys(schema.properties)) do
-			children[#children + 1] = {
-				label = tostring(key),
-				value = schema.properties[key],
-			}
-		end
-	end
-
-	if schema.items ~= nil then
-		children[#children + 1] = {
-			label = "[]",
-			value = schema.items,
-		}
-	end
-
-	if schema.additionalProperties == true then
-		children[#children + 1] = {
-			label = "{*}",
-			value = { type = "any" },
-		}
-	elseif type(schema.additionalProperties) == "table" then
-		children[#children + 1] = {
-			label = "{*}",
-			value = schema.additionalProperties,
-		}
+return M
