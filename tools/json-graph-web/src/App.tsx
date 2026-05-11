@@ -8,6 +8,43 @@ type SessionPayload = {
   mode: "schema" | "data" | "auto";
 };
 
+function isSessionPayload(value: unknown): value is SessionPayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<SessionPayload>;
+  return (
+    typeof candidate.title === "string" &&
+    typeof candidate.jsonText === "string" &&
+    (candidate.mode === "schema" || candidate.mode === "data" || candidate.mode === "auto")
+  );
+}
+
+function readSessionFromHash(): SessionPayload | null {
+  const hash = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+
+  if (!hash) {
+    return null;
+  }
+
+  const params = new URLSearchParams(hash);
+  const encodedSession = params.get("session");
+  if (!encodedSession) {
+    return null;
+  }
+
+  try {
+    const decodedSession = decodeURIComponent(encodedSession);
+    const parsed = JSON.parse(decodedSession) as unknown;
+    return isSessionPayload(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function chooseLayout(mode: SessionPayload["mode"]): LayoutDirection {
   if (mode === "schema") {
     return "DOWN";
@@ -21,6 +58,12 @@ export function App() {
   const [jumpState, setJumpState] = useState<string>("");
 
   useEffect(() => {
+    const inlineSession = readSessionFromHash();
+    if (inlineSession) {
+      setSession(inlineSession);
+      return;
+    }
+
     let active = true;
 
     fetch("/api/session")
@@ -61,6 +104,11 @@ export function App() {
   }, [session]);
 
   const onNodeClick = async (node: NodeData) => {
+    if (window.location.protocol === "file:") {
+      setJumpState("Jump is unavailable in file mode");
+      return;
+    }
+
     const path = Array.isArray(node.path) ? node.path : null;
     if (!path) {
       setJumpState("Node has no path metadata");

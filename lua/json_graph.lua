@@ -23,6 +23,12 @@ local function read_current_buffer_text(bufnr)
 	return table.concat(lines, "\n")
 end
 
+local function url_encode(value)
+	return (value:gsub("([^%w%-_%.~])", function(char)
+		return string.format("%%%02X", string.byte(char))
+	end))
+end
+
 local function decode_json(text)
 	local ok, decoded = pcall(vim.json.decode, text)
 	if not ok then
@@ -93,6 +99,21 @@ local function open_in_split(decoded)
 	vim.api.nvim_win_set_buf(0, buf)
 end
 
+local function build_file_session_target(index_path, bufnr, json_text, mode)
+	local title = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":t")
+	if title == "" then
+		title = "JSON Graph"
+	end
+
+	local payload = vim.json.encode({
+		title = title,
+		jsonText = json_text,
+		mode = mode,
+	})
+
+	return "file://" .. index_path .. "#session=" .. url_encode(payload)
+end
+
 function M.open(opts)
 	opts = opts or {}
 	local bufnr = vim.api.nvim_get_current_buf()
@@ -118,7 +139,8 @@ function M.open(opts)
 		return
 	end
 
-	local target = "file://" .. web_dist_index()
+	local mode = opts.mode or "auto"
+	local target = build_file_session_target(web_dist_index(), bufnr, text, mode)
 	if vim.ui and vim.ui.open then
 		vim.ui.open(target)
 	else
