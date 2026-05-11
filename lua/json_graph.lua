@@ -43,20 +43,37 @@ local function run_command(cmd, cwd)
 	return ok, output or "", ok and "" or (output or "")
 end
 
+local function format_command_error(prefix, stdout_text, stderr_text)
+	local stdout_trimmed = vim.trim(stdout_text or "")
+	local stderr_trimmed = vim.trim(stderr_text or "")
+	local details = stderr_trimmed
+	if details == "" then
+		details = stdout_trimmed
+	end
+	if details == "" then
+		return prefix
+	end
+	return prefix .. ": " .. details
+end
+
 function M.build_web()
 	local root = web_root()
 	if vim.uv.fs_stat(root .. "/package.json") == nil then
 		return nil, "Missing tools/json-graph-web/package.json"
 	end
 
-	local ok_install, _, install_err = run_command({ "pnpm", "install", "--frozen-lockfile" }, root)
+	local ok_install, install_out, install_err = run_command({ "pnpm", "install", "--frozen-lockfile" }, root)
 	if not ok_install then
-		return nil, "pnpm install failed: " .. install_err
+		-- Lockfile mismatches are common across pnpm versions; retry non-frozen install.
+		ok_install, install_out, install_err = run_command({ "pnpm", "install" }, root)
+	end
+	if not ok_install then
+		return nil, format_command_error("pnpm install failed", install_out, install_err)
 	end
 
-	local ok_build, _, build_err = run_command({ "pnpm", "build" }, root)
+	local ok_build, build_out, build_err = run_command({ "pnpm", "build" }, root)
 	if not ok_build then
-		return nil, "pnpm build failed: " .. build_err
+		return nil, format_command_error("pnpm build failed", build_out, build_err)
 	end
 
 	local dist = web_dist_index()
